@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema POS - Almacén Inteligente</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+
+    <!--
+        ANTES: aquí se cargaba Tailwind vía CDN (<script src="https://cdn.tailwindcss.com">)
+        más un <script> con el "tailwind.config". Eso obliga al NAVEGADOR a compilar
+        TODO el CSS en tiempo real, cada vez que se abre la app, además de requerir
+        internet para descargar el compilador. Es la causa principal de que la app
+        se sintiera pesada/lenta al arrancar.
+
+        AHORA: se usa un archivo .css ya compilado y minificado (generado una sola
+        vez a partir de ese mismo config, ver /tailwind-build en la raíz del
+        proyecto) que el navegador simplemente descarga y aplica, sin compilar
+        nada. Arranque instantáneo y la app funciona aunque no haya internet.
+
+        Si en el futuro agregas clases de Tailwind nuevas en el HTML/JS que no
+        existían antes, hay que regenerar este archivo (ver tailwind-build/README.txt).
+    -->
+    <link rel="stylesheet" href="/static/css/tailwind.built.css">
+
+    <style>
+        .scanner-input { opacity: 0; position: absolute; z-index: -1; }
+        .view-section { display: none; }
+        .view-section.active { display: flex; animation: fadeInUp .4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+        @keyframes pulseTotal {
+            0%   { transform: scale(1); }
+            40%  { transform: scale(1.03); }
+            100% { transform: scale(1); }
+        }
+        .pulse-total { animation: pulseTotal .3s ease; }
+
+        /* ===================================================================
+           RENDIMIENTO: los círculos decorativos de fondo ("blobs") traían de
+           Tailwind una animación infinita (25s en bucle, para siempre,
+           mientras la pestaña esté abierta) que los mueve y escala sin
+           parar. Cada uno además tiene un desenfoque (blur) muy pesado de
+           computar, y encima hay paneles con "glassmorphism" (vidrio
+           esmerilado / backdrop-filter) flotando ENCIMA de ellos. La
+           combinación de las tres cosas obliga al navegador a recalcular el
+           desenfoque muchas veces por segundo sin descanso, como si fuera
+           el bucle de renderizado de un videojuego, aunque no estés
+           haciendo nada en la pantalla. Eso es lo que se siente como
+           "trabado" sobre todo en equipos modestos.
+
+           Aquí se anula esa animación infinita (los círculos se quedan
+           quietos en su posición inicial, con el mismo color/desenfoque de
+           siempre, así que se ve prácticamente igual) y así el navegador
+           deja de repintarlos sin parar. Esto por sí solo debería quitar
+           la mayor parte de la "trabada" constante en cualquier dispositivo.
+        =================================================================== */
+        .animate-blob { animation: none !important; }
+
+        /* ===================================================================
+           RENDIMIENTO (4ta pasada): aunque los círculos de fondo ya no se
+           mueven, seguía habiendo "vidrio esmerilado" (backdrop-filter:
+           blur) en zonas que el navegador tiene que recalcular todo el
+           tiempo, y eso es justo lo que se sentía al dar clic:
+
+           1) El contenido con scroll (<main>) y la barra lateral (<aside>)
+              tenían blur de fondo. Como <main> tiene scroll, el navegador
+              recalculaba ese desenfoque en cada frame mientras te movías
+              o mientras la tabla de abajo se volvía a pintar tras un clic.
+           2) Los encabezados "pegajosos" de las tablas (Inventario, Ventas,
+              Finanzas) también tenían blur: la combinación "sticky +
+              blur" es de las más pesadas que existen en CSS, porque se
+              vuelve a calcular en cada pixel de scroll.
+           3) Los modales de Editar y de Ticket (al cobrar) cubren TODA la
+              pantalla de golpe con blur de fondo: el navegador tiene que
+              difuminar TODO lo que hay detrás en un solo instante justo
+              en el momento del clic, lo cual se siente como una trabada
+              exactamente cuando presionas "Editar" o "Cobrar".
+
+           Aquí se quita el blur en esas zonas puntuales (se deja un fondo
+           blanco/oscuro semitransparente normal, sin desenfoque) sin
+           tocar el resto del diseño ni los colores. Se ve prácticamente
+           igual, solo que deja de ser tan caro de calcular.
+        =================================================================== */
+        main.overflow-y-auto,
+        aside {
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
+        thead.sticky {
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
+        #ticket-modal, #edit-modal {
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
+        /* Los círculos de fondo también bajan su desenfoque (de 70px/40px a
+           algo mucho más barato de calcular), sin cambiar su color, tamaño
+           ni posición: se ven prácticamente igual, solo más ligeros. */
+        .blur-\[70px\] { filter: blur(28px) !important; }
+        .blur-2xl { filter: blur(20px) !important; }
+
+        /* Barra de scroll */
+        * { scrollbar-width: thin; scrollbar-color: rgba(182, 101, 29, 0.3) transparent; }
+        *::-webkit-scrollbar { width: 6px; height: 6px; }
+        *::-webkit-scrollbar-thumb { background: rgba(182, 101, 29, 0.3); border-radius: 10px; }
+        *::-webkit-scrollbar-thumb:hover { background: rgba(182, 101, 29, 0.6); }
+
+        /* Utilidades Glassmorphism para la app principal */
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            box-shadow: 0 8px 32px 0 rgba(61, 53, 43, 0.05);
+        }
+        
+        .glass-input {
+            background: rgba(255, 255, 255, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.8);
+        }
+        .glass-input:focus {
+            background: rgba(255, 255, 255, 1);
+            border-color: rgba(182, 101, 29, 0.5);
+            box-shadow: 0 0 0 3px rgba(182, 101, 29, 0.15);
+        }
+        
+        /* Autofill override para los inputs oscuros del login */
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover, 
+        input:-webkit-autofill:focus, 
+        input:-webkit-autofill:active{
+            -webkit-box-shadow: 0 0 0 30px #374253 inset !important;
+            -webkit-text-fill-color: white !important;
+            transition: background-color 5000s ease-in-out 0s;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+        }
+
+        /* ===================================================================
+           TICKET DE VENTA: pensado para parecer un recibo real de tienda
+           (papel térmico de 80mm), tanto en la vista previa en pantalla como
+           al imprimirse de verdad.
+        =================================================================== */
+        .ticket-paper {
+            width: 300px;
+            background: #ffffff;
+            color: #1a1a1a;
+            font-family: 'Courier New', ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12.5px;
+            line-height: 1.5;
+            padding: 20px 18px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+        }
+        .ticket-paper .t-center { text-align: center; }
+        .ticket-paper .t-row { display: flex; justify-content: space-between; gap: 10px; }
+        .ticket-paper .t-divider { border-top: 1px dashed #888; margin: 10px 0; }
+        .ticket-paper .t-brand { font-weight: 800; font-size: 16px; letter-spacing: 1px; }
+        .ticket-paper .t-sub { font-size: 10.5px; color: #555; }
+        .ticket-paper .t-items table { width: 100%; border-collapse: collapse; }
+        .ticket-paper .t-items td { padding: 1px 0; vertical-align: top; }
+        .ticket-paper .t-total { font-size: 16px; font-weight: 800; }
+        .ticket-paper .t-foot { font-size: 10.5px; color: #666; margin-top: 4px; }
+
+        /* Al imprimir (Ctrl+P o el botón Imprimir), se oculta TODO lo demás
+           y solo se imprime el ticket, ajustado al ancho típico de una
+           impresora térmica de 80mm, sin márgenes desperdiciados. */
+        @media print {
+            body * { visibility: hidden; }
+            #ticket-print, #ticket-print * { visibility: visible; }
+            #ticket-print {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 80mm;
+                max-width: 80mm;
+                padding: 6mm 4mm;
+                margin: 0;
+                box-shadow: none;
+            }
+            @page { size: 80mm auto; margin: 0; }
+        }
+    </style>
+</head>
+<body class="bg-cream text-ink font-sans h-screen overflow-hidden antialiased relative">
+
+    <div id="login-screen" class="relative z-50 h-screen w-full flex items-center justify-center px-4 overflow-hidden">
+        
+        <div class="absolute inset-0 bg-[#5A6C85] z-0"></div> <div class="absolute top-[-20%] left-[-10%] w-[70vw] h-[70vw] bg-[#E2A478] rounded-full mix-blend-overlay filter blur-[70px] opacity-80 animate-blob z-0"></div>
+        <div class="absolute bottom-[-20%] right-[-10%] w-[60vw] h-[60vw] bg-[#7C5065] rounded-full mix-blend-overlay filter blur-[70px] opacity-80 animate-blob animation-delay-2000 z-0"></div>
+
+        <div class="relative z-10 w-full max-w-lg flex flex-col items-center">
+
+            <!-- Pantalla de login: un único perfil (Administrador). Pide
+                 usuario y contraseña real (ya no existe el acceso libre sin
+                 contraseña ni el perfil "Usuario"). -->
+            <div id="profile-select" class="w-full flex justify-center gap-12 sm:gap-20 animate-zoomIn">
+
+                <button id="btn-profile-admin" class="group flex flex-col items-center gap-4 transition-all hover:-translate-y-2 focus:outline-none">
+                    <div class="w-32 h-32 rounded-full bg-[#BA2C8E] flex items-center justify-center text-white shadow-xl border-[6px] border-transparent group-hover:border-white/30 transition-all duration-300">
+                        <svg class="w-14 h-14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                        </svg>
+                    </div>
+                    <span class="text-white font-sans text-xl font-medium tracking-wide drop-shadow-md">Administrador</span>
+                </button>
+            </div>
+
+            <form id="admin-login-form" class="hidden relative w-80 sm:w-[360px] animate-zoomIn mt-12">
+
+                <div class="absolute -top-12 left-1/2 transform -translate-x-1/2 w-24 h-24 bg-logindark rounded-full flex items-center justify-center shadow-lg border-[6px] border-[#D9DFE8]/60 z-20 backdrop-blur-sm">
+                    <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                    </svg>
+                </div>
+
+                <div class="bg-white/80 backdrop-blur-lg rounded-3xl pt-16 pb-8 px-8 shadow-loginCard border border-white/60 relative">
+                    <div class="flex flex-col gap-5">
+
+                        <p class="text-center text-ink/60 font-display font-bold text-sm -mt-2 mb-1">Inicia sesión con tu usuario</p>
+
+                        <div class="relative bg-logininput rounded-lg flex items-center overflow-hidden border border-white/10 shadow-inner">
+                            <div class="pl-4 pr-3 py-3 text-white/50">
+                                <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd"></path>
+                                </svg>
+                            </div>
+                            <input type="text" id="admin-username" autocomplete="username" class="bg-transparent text-white w-full py-3.5 pr-4 outline-none text-sm placeholder-white/40 font-medium" placeholder="Usuario">
+                        </div>
+
+                        <div class="relative bg-logininput rounded-lg flex items-center overflow-hidden border border-white/10 shadow-inner">
+                            <div class="pl-4 pr-3 py-3 text-white/50">
+                                <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"></path>
+                                </svg>
+                            </div>
+                            <input type="password" id="admin-password" autocomplete="current-password" class="bg-transparent text-white w-full py-3.5 pr-4 outline-none text-sm placeholder-white/40 font-medium" placeholder="Contraseña">
+                        </div>
+
+                        <p id="login-error" class="hidden text-danger text-xs font-bold bg-danger/10 p-2 rounded text-center"></p>
+
+                        <button type="submit" class="w-full py-4 bg-gradient-to-r from-logindark to-[#3D4F63] hover:from-[#3D4F63] hover:to-logindark text-white font-display font-black tracking-wider uppercase text-sm rounded-xl shadow-xl transition-all duration-300 hover:-translate-y-0.5 focus:outline-none mt-1">
+                            Iniciar Sesión
+                        </button>
+                        <button type="button" id="btn-back-to-profiles" class="w-full text-ink/50 hover:text-ink text-xs font-semibold py-1 transition-colors focus:outline-none tracking-wide">
+                            ← Volver a Perfiles
+                        </button>
+
+                    </div>
+                </div>
+
+            </form>
+
+        </div>
+    </div>
+
+    <div id="app-shell" class="hidden relative z-10 w-full h-screen p-4 sm:p-6 overflow-hidden">
+        
+        <div class="absolute top-[-10%] left-[-10%] w-96 h-96 bg-primary-soft rounded-full mix-blend-multiply filter blur-2xl opacity-70 animate-blob z-0"></div>
+        <div class="absolute bottom-[-10%] left-[20%] w-96 h-96 bg-paper rounded-full mix-blend-multiply filter blur-2xl opacity-80 animate-blob animation-delay-4000 z-0"></div>
+
+        <div class="glass-panel w-full h-full rounded-[2rem] flex overflow-hidden shadow-2xl relative z-10">
+
+            <aside class="w-72 bg-white/40 border-r border-white/50 flex flex-col relative z-20 backdrop-blur-sm">
+                <div class="p-8 border-b border-white/50">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white shadow-md font-bold text-xl">Hi</div>
+                        <h2 class="font-display text-xl font-extrabold text-ink tracking-tight uppercase">Punto De Venta</h2>
+                    </div>
+                </div>
+                <nav class="flex-1 space-y-2 p-5" id="nav-menu">
+                    <button data-target="view-pos" class="w-full text-left px-5 py-3.5 rounded-xl bg-white/70 text-primary-dark font-display font-bold shadow-sm border border-white/90 transition-all duration-200 hover:-translate-y-0.5 flex items-center gap-3">
+                        <span class="text-xl">🛒</span> Terminal
+                    </button>
+                    <button data-target="view-inventory" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">📦</span> Inventario
+                    </button>
+                    <button data-target="view-loans" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">🤝</span> Préstamos
+                    </button>
+                    <button data-target="view-finances" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">📊</span> Finanzas
+                    </button>
+                    <button data-target="view-topsellers" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">🏆</span> Más Vendidos
+                    </button>
+                    <button data-target="view-suppliers" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">🚚</span> Proveedores
+                    </button>
+                    <button data-target="view-smart" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">⚡</span> IA Almacén
+                    </button>
+                    <button data-target="view-notes" class="w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">📝</span> Notas
+                    </button>
+                    <!-- Exclusivo del Dueño: se oculta con JS (enterApp) para
+                         cualquier otro perfil, y el servidor también lo
+                         bloquea aunque alguien intente llamar a la API
+                         directamente (ver app.py: login_required('owner')). -->
+                    <button data-target="view-users" class="hidden w-full text-left px-5 py-3.5 rounded-xl text-ink/80 font-display font-semibold hover:bg-white/60 hover:text-ink transition-all duration-200 flex items-center gap-3 border border-transparent hover:border-white/50">
+                        <span class="text-xl">👥</span> Usuarios
+                    </button>
+                </nav>
+                <div class="p-6 border-t border-white/50 bg-white/30">
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="w-10 h-10 rounded-full bg-white flex items-center justify-center border border-white/60 shadow-sm text-lg">👤</div>
+                        <div>
+                            <p id="current-role-sublabel" class="text-[10px] text-muted font-bold uppercase tracking-wider">Sesión Activa</p>
+                            <p id="current-role-label" class="font-display font-bold text-ink text-sm">Usuario</p>
+                        </div>
+                    </div>
+                    <button id="btn-change-password" class="w-full text-xs text-ink/70 hover:text-ink bg-white/60 hover:bg-white font-bold py-2 rounded-xl border border-white/70 transition-all duration-200 active:scale-95 mb-2">🔒 Cambiar mi Contraseña</button>
+                    <button id="btn-logout" class="w-full text-sm text-danger hover:text-white bg-danger/10 hover:bg-danger font-bold py-2.5 rounded-xl border border-danger/20 transition-all duration-200 active:scale-95">Cerrar Sesión</button>
+                </div>
+            </aside>
+
+            <main class="flex-1 flex flex-col h-full overflow-y-auto relative z-10 bg-white/20 backdrop-blur-sm">
+
+                <section id="view-pos" class="view-section active flex-col h-full p-8 lg:p-10">
+                    <input type="text" id="barcode-input" class="scanner-input" autofocus autocomplete="off">
+                    
+                    <header class="mb-8 flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6">
+                        <div class="w-full lg:w-3/5">
+                            <h1 class="font-display text-4xl font-extrabold text-ink mb-1">Caja Principal</h1>
+                            <p class="text-ink/60 font-medium mb-5">Escanea un producto o búscalo manualmente</p>
+                            <div class="flex gap-3">
+                                <input type="text" id="manual-search" placeholder="Escribe nombre o código de barras..." class="glass-input flex-1 rounded-xl p-3.5 outline-none transition-all text-base font-medium text-ink">
+                                <button id="btn-search" class="bg-ink hover:bg-ink/85 text-white px-8 py-3.5 rounded-xl font-display font-bold transition-all duration-200 shadow-md hover:shadow-lg active:scale-95 flex items-center gap-2">
+                                    <span>🔍</span> Buscar
+                                </button>
+                            </div>
+                        </div>
+                        <div class="w-full lg:w-auto relative group">
+                            <div class="absolute -inset-1 bg-gradient-to-r from-primary to-sage rounded-3xl blur opacity-20 group-hover:opacity-40 transition duration-500"></div>
+                            <div class="relative bg-white/80 backdrop-blur-md rounded-2xl px-10 py-6 border border-white/90 shadow-glass text-right min-w-[280px]">
+                                <span class="text-ink/60 font-bold uppercase text-xs tracking-widest block mb-1">Total a Cobrar</span>
+                                <div class="font-display text-5xl lg:text-6xl font-black text-primary-dark tabular-nums tracking-tight" id="total-display">$0.00</div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div class="flex-1 glass-panel rounded-3xl overflow-hidden flex flex-col border border-white/80">
+                        <div class="overflow-y-auto flex-1 p-2">
+                            <table class="w-full text-left border-collapse">
+                                <thead class="text-ink/60 text-xs uppercase tracking-wider sticky top-0 bg-white/90 backdrop-blur-sm rounded-xl z-10 shadow-sm">
+                                    <tr>
+                                        <th class="py-4 px-6 font-bold rounded-tl-xl">Producto</th>
+                                        <th class="py-4 px-6 font-bold">Precio Unit.</th>
+                                        <th class="py-4 px-6 text-center font-bold">Cantidad</th>
+                                        <th class="py-4 px-6 text-right font-bold">Subtotal</th>
+                                        <th class="py-4 px-6 text-center font-bold rounded-tr-xl">Acción</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cart-body" class="divide-y divide-white/60"></tbody>
+                            </table>
+                        </div>
+                        <div class="bg-white/60 backdrop-blur-sm p-6 border-t border-white/70 flex flex-col sm:flex-row justify-end gap-4">
+                            <button id="btn-clear-cart" class="bg-white/80 hover:bg-white text-ink font-display font-bold py-3.5 px-8 rounded-xl border border-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 active:scale-95">Vaciar Carrito</button>
+                            <button id="btn-checkout" class="bg-gradient-to-r from-primary to-primary-light hover:from-primary-dark hover:to-primary text-white font-display font-black py-3.5 px-10 rounded-xl shadow-glassHover text-lg transition-all duration-200 hover:-translate-y-1 active:scale-95 border border-primary/50 flex items-center gap-2">
+                                Cobrar Cuenta <span>(Enter)</span>
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="view-inventory" class="view-section flex-col p-8 lg:p-10">
+                    <h1 class="font-display text-4xl font-extrabold text-ink mb-8">Gestión de Inventario</h1>
+                    
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                        <div class="lg:col-span-2 glass-panel p-8 rounded-3xl border border-white/80">
+                            <h2 class="font-display text-xl font-bold mb-6 text-ink flex items-center gap-2"><span class="text-2xl"></span> Alta de Producto</h2>
+                            <form id="add-product-form" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input type="text" id="inv-name" placeholder="Nombre Comercial (llave)" required class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <input type="text" id="inv-brand" placeholder="Marca (ej. Coca-Cola, Bimbo...)" class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <div class="md:col-span-2">
+                                    <input type="text" id="inv-barcode" placeholder="Código de Barras (opcional, autocompleta Nombre y Marca al escanear)" class="glass-input w-full rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                    <p id="inv-barcode-hint" class="hidden text-xs font-semibold mt-1.5 ml-1"></p>
+                                </div>
+                                <select id="inv-category" required class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink appearance-none"></select>
+                                <input type="number" step="0.01" id="inv-cost" placeholder="Costo $ (opcional)" class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <input type="number" step="0.01" id="inv-price" placeholder="Precio $ (opcional)" class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <div class="flex gap-3">
+                                    <input type="number" id="inv-stock" placeholder="Stock (opcional)" class="w-1/2 glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                    <button type="submit" class="w-1/2 bg-ink hover:bg-ink/80 text-white font-display font-bold text-sm rounded-xl transition-all duration-200 shadow-md hover:-translate-y-0.5 active:scale-95">Guardar</button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <div class="glass-panel p-8 rounded-3xl border border-white/80 flex flex-col">
+                            <h2 class="font-display text-xl font-bold mb-6 text-ink flex items-center gap-2"><span class="text-2xl"></span> Secciones</h2>
+                            <form id="add-category-form" class="flex gap-2 mb-4">
+                                <input type="text" id="cat-name" placeholder="Ej. Lácteos..." required class="glass-input flex-1 rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <button type="submit" class="bg-primary hover:bg-primary-dark text-white font-display font-bold text-sm px-4 rounded-xl transition-all shadow-md active:scale-95">+</button>
+                            </form>
+                            <div class="flex-1 overflow-y-auto glass-input rounded-xl p-3 max-h-[140px]">
+                                <ul id="categories-list" class="divide-y divide-white/50 text-sm font-medium text-ink"></ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="glass-panel rounded-3xl border border-white/80 flex-1 flex flex-col overflow-hidden">
+                        <div class="bg-white/50 border-b border-white/60 p-5 flex flex-wrap items-center justify-between gap-4">
+                            <div class="flex flex-wrap gap-2 bg-white/50 p-1.5 rounded-xl border border-white/70 shadow-innerSoft" id="inventory-tabs"></div>
+                            <div class="w-full md:w-80 relative">
+                                <span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted">🔍</span>
+                                <input type="text" id="inventory-search-input" placeholder="Buscar artículo..." class="glass-input w-full rounded-xl py-2.5 pl-10 pr-4 text-sm outline-none transition-all text-ink">
+                            </div>
+                        </div>
+                        <div class="flex-1 overflow-y-auto p-4">
+                            <table class="w-full text-left">
+                                <thead class="text-ink/60 uppercase text-xs font-bold tracking-wider sticky top-0 bg-white/90 backdrop-blur-sm rounded-xl z-10 shadow-sm">
+                                    <tr>
+                                        <th class="py-3 px-4 rounded-tl-xl">Nombre del Artículo</th>
+                                        <th class="py-3 px-4">Código</th>
+                                        <th class="py-3 px-4">Sección</th>
+                                        <th class="py-3 px-4">Marca</th>
+                                        <th class="py-3 px-4">Costo U.</th>
+                                        <th class="py-3 px-4">Precio U.</th>
+                                        <th class="py-3 px-4 text-center">Stock Actual</th>
+                                        <th class="py-3 px-4 text-center rounded-tr-xl">Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="inventory-body" class="divide-y divide-white/60 text-sm font-medium text-ink"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="view-loans" class="view-section flex-col p-8 lg:p-10">
+                    <h1 class="font-display text-4xl font-extrabold text-ink mb-2">Préstamos / Fiado</h1>
+                    <p class="text-ink/60 font-medium mb-8">Registra lo que le fías a un cliente. El producto se descuenta del inventario de inmediato, pero no se contabiliza en Finanzas hasta que marques la cuenta como pagada.</p>
+
+                    <div class="glass-panel p-8 rounded-3xl border border-white/80 mb-8">
+                        <h2 class="font-display text-xl font-bold mb-6 text-ink flex items-center gap-2"><span class="text-2xl">📝</span> Registrar Préstamo</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                            <div class="md:col-span-2">
+                                <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Nombre del Cliente</label>
+                                <input type="text" id="loan-customer-name" list="loan-customer-suggestions" placeholder="Ej. Juan Pérez" class="glass-input w-full rounded-xl p-3 mt-1.5 text-sm outline-none transition-all font-medium text-ink">
+                                <datalist id="loan-customer-suggestions"></datalist>
+                            </div>
+                            <div>
+                                <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Cantidad</label>
+                                <input type="number" id="loan-quantity" min="1" value="1" class="glass-input w-full rounded-xl p-3 mt-1.5 text-sm outline-none transition-all font-medium text-ink">
+                            </div>
+                        </div>
+                        <div class="flex gap-3">
+                            <input type="text" id="loan-barcode-input" placeholder="Escanea el código de barras, o escribe el nombre del producto..." class="glass-input flex-1 rounded-xl p-3.5 outline-none transition-all text-base font-medium text-ink">
+                            <button id="loan-btn-add" type="button" class="bg-ink hover:bg-ink/85 text-white px-8 py-3.5 rounded-xl font-display font-bold transition-all duration-200 shadow-md hover:shadow-lg active:scale-95 flex items-center gap-2 flex-shrink-0">
+                                <span>➕</span> Agregar
+                            </button>
+                        </div>
+                        <p id="loan-form-hint" class="hidden text-xs font-semibold mt-2.5 ml-1"></p>
+                    </div>
+
+                    <div class="glass-panel rounded-3xl border border-white/80 flex-1 flex flex-col overflow-hidden">
+                        <h2 class="font-display text-xl font-bold text-ink p-6 pb-4 border-b border-white/60 flex items-center gap-2"><span class="text-2xl">📋</span> Cuentas Abiertas</h2>
+                        <div id="loans-list" class="flex-1 overflow-y-auto p-6 space-y-4"></div>
+                    </div>
+                </section>
+
+                <section id="view-finances" class="view-section flex-col p-8 lg:p-10">
+                    <div class="flex items-center justify-between mb-2 flex-wrap gap-3">
+                        <h1 class="font-display text-4xl font-extrabold text-ink">Finanzas</h1>
+                        <span id="finance-today-label" class="text-sm font-bold text-ink/70 bg-white/70 px-4 py-2 rounded-xl border border-white/80 shadow-sm">📅 Hoy</span>
+                    </div>
+                    <p class="text-ink/60 font-medium mb-8">Los montos de "Hoy" se reinician automáticamente cada día. Más abajo puedes consultar días anteriores y el acumulado general de siempre.</p>
+
+                    <div id="finance-kpis" class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                        <div class="glass-panel border border-white/80 p-8 rounded-3xl transition-all duration-300 hover:-translate-y-1 hover:shadow-glassHover relative overflow-hidden group">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-primary/10 rounded-full blur-xl group-hover:bg-primary/20 transition-all"></div>
+                            <h3 class="text-ink/60 text-xs font-black uppercase tracking-widest mb-2 relative z-10">Ingresos de Hoy</h3>
+                            <p class="font-display text-5xl font-black text-ink tabular-nums relative z-10" id="fin-income">$0.00</p>
+                        </div>
+                        <div class="glass-panel border border-danger/30 p-8 rounded-3xl transition-all duration-300 hover:-translate-y-1 hover:shadow-glassHover relative overflow-hidden group">
+                            <div class="absolute -right-4 -top-4 w-24 h-24 bg-danger/10 rounded-full blur-xl group-hover:bg-danger/20 transition-all"></div>
+                            <h3 class="text-ink/60 text-xs font-black uppercase tracking-widest mb-2 relative z-10">Costo de Hoy</h3>
+                            <p class="font-display text-5xl font-black text-danger tabular-nums relative z-10" id="fin-costs">$0.00</p>
+                        </div>
+                        <div class="glass-panel border border-sage/40 bg-sage-soft/40 p-8 rounded-3xl transition-all duration-300 hover:-translate-y-1 hover:shadow-glassHover relative overflow-hidden group">
+                            <div class="absolute -right-4 -top-4 w-32 h-32 bg-sage/20 rounded-full blur-2xl group-hover:bg-sage/30 transition-all"></div>
+                            <h3 class="text-sage-dark/80 text-xs font-black uppercase tracking-widest mb-2 relative z-10">Utilidad de Hoy</h3>
+                            <p class="font-display text-5xl font-black text-sage-dark tabular-nums relative z-10" id="fin-profit">$0.00</p>
+                        </div>
+                    </div>
+                    <p id="finance-restricted-note" class="hidden text-ink/70 bg-white/70 p-4 rounded-xl border border-white/80 font-medium text-sm mb-8 backdrop-blur-sm shadow-sm">🔒 Los montos de ingresos, costos y utilidad son exclusivos del perfil Administrador.</p>
+
+                    <div id="finance-general-kpis" class="hidden mb-8">
+                        <h3 class="text-xs font-black uppercase tracking-widest text-ink/50 mb-3 ml-1">📈 Histórico General (acumulado de siempre)</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div class="bg-white/60 border border-white/80 p-5 rounded-2xl">
+                                <h4 class="text-ink/50 text-[10px] font-black uppercase tracking-widest mb-1">Ingresos Totales</h4>
+                                <p class="font-display text-2xl font-bold text-ink tabular-nums" id="fin-gen-income">$0.00</p>
+                            </div>
+                            <div class="bg-white/60 border border-white/80 p-5 rounded-2xl">
+                                <h4 class="text-ink/50 text-[10px] font-black uppercase tracking-widest mb-1">Costo Total</h4>
+                                <p class="font-display text-2xl font-bold text-danger tabular-nums" id="fin-gen-costs">$0.00</p>
+                            </div>
+                            <div class="bg-white/60 border border-white/80 p-5 rounded-2xl">
+                                <h4 class="text-ink/50 text-[10px] font-black uppercase tracking-widest mb-1">Utilidad Total</h4>
+                                <p class="font-display text-2xl font-bold text-sage-dark tabular-nums" id="fin-gen-profit">$0.00</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="finance-history-section" class="hidden glass-panel border border-white/80 rounded-3xl p-6 mb-8">
+                        <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+                            <h3 class="font-display text-lg font-bold text-ink flex items-center gap-2"><span>🗓️</span> Historial por Día</h3>
+                            <div class="flex items-center gap-2">
+                                <button id="btn-toggle-finance-history" type="button" class="text-xs font-bold text-ink/70 bg-white/70 hover:bg-white px-3.5 py-2 rounded-lg transition-colors border border-white/80 whitespace-nowrap">🙈 Ocultar Días</button>
+                                <button id="btn-delete-all-finances" type="button" class="text-xs font-bold text-danger bg-danger-soft hover:bg-danger/20 px-3.5 py-2 rounded-lg transition-colors whitespace-nowrap">🗑️ Borrar Todas las Finanzas</button>
+                            </div>
+                        </div>
+                        <div id="finance-history-list" class="flex flex-wrap gap-2.5"></div>
+                    </div>
+
+                    <div class="glass-panel border border-white/80 rounded-3xl flex-1 overflow-hidden flex flex-col p-2">
+                        <div class="flex items-center justify-between flex-wrap gap-3 p-6 pb-4 border-b border-white/60">
+                            <h2 id="sales-history-title" class="font-display text-xl font-bold text-ink">Ventas de Hoy</h2>
+                            <button id="btn-back-to-today" type="button" class="hidden text-xs font-bold text-primary-dark bg-primary-soft hover:bg-primary/20 px-3.5 py-2 rounded-lg transition-colors">← Volver a Hoy</button>
+                        </div>
+                        <div class="flex-1 overflow-y-auto px-4 pb-4">
+                            <table class="w-full text-left">
+                                <thead class="text-ink/60 uppercase text-xs font-bold tracking-wider sticky top-0 bg-white/90 backdrop-blur-sm rounded-xl z-10 shadow-sm">
+                                    <tr>
+                                        <th class="py-4 px-4 rounded-tl-xl">ID Operación</th>
+                                        <th class="py-4 px-4">Fecha y Hora</th>
+                                        <th class="py-4 px-4">Productos Vendidos</th>
+                                        <th class="py-4 px-4 text-right">Cobrado</th>
+                                        <th id="th-profit" class="py-4 px-4 text-right">Utilidad</th>
+                                        <th id="th-action" class="py-4 px-4 text-center rounded-tr-xl">Acción</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sales-history-body" class="divide-y divide-white/60 text-sm font-medium text-ink"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="view-smart" class="view-section flex-col p-8 lg:p-10 items-center justify-center relative">
+                    <div class="w-full max-w-3xl relative z-10">
+                        <div class="text-center mb-8">
+                            <div class="inline-block p-4 bg-white/80 rounded-3xl shadow-glass border border-white mb-6">
+                                <span class="text-5xl">🧠</span>
+                            </div>
+                            <h1 class="font-display text-4xl font-extrabold text-ink mb-3">Abastecimiento Inteligente</h1>
+                            <p class="text-ink/70 font-medium text-lg">Usa lenguaje natural. Ejemplo: <span class="font-mono bg-white/80 px-2 py-1 rounded-md text-primary-dark border border-white">Ingresa 12 cocas y 5 bimbos</span>.</p>
+                        </div>
+                        
+                        <div class="glass-panel border border-white/80 p-4 rounded-[2rem] relative group">
+                            <textarea id="smart-text" rows="3" class="w-full bg-white/60 border border-white/50 rounded-2xl p-6 outline-none transition-all text-xl font-medium text-ink focus:bg-white/90 focus:border-white shadow-innerSoft resize-none" placeholder="¿Qué ingresó al almacén hoy?"></textarea>
+                            <button id="btn-smart" class="mt-4 w-full bg-primary hover:bg-primary-dark text-white font-display font-black text-lg py-4 rounded-xl transition-all duration-300 shadow-glass hover:shadow-glassHover active:scale-[0.98] border border-primary/50">
+                                Procesar Comando
+                            </button>
+                        </div>
+                        <div id="smart-results" class="mt-8 glass-panel border border-white/80 p-8 rounded-[2rem] hidden transform transition-all duration-500"></div>
+                    </div>
+                </section>
+
+                <!-- =====================================================
+                     MÁS VENDIDOS: qué productos se venden más. Se calcula
+                     con las ventas que CADA usuario registró (igual que
+                     el resto de su información), disponible para todos
+                     los perfiles porque solo muestra cantidades, nunca
+                     dinero. -->
+                <section id="view-topsellers" class="view-section flex-col p-8 lg:p-10">
+                    <header class="mb-6">
+                        <h1 class="font-display text-4xl font-extrabold text-ink mb-1">🏆 Más Vendidos</h1>
+                        <p class="text-ink/60 font-medium">Los productos que más se han vendido en tus propias ventas.</p>
+                    </header>
+
+                    <div id="topsellers-empty" class="hidden text-center py-16 text-muted text-sm glass-panel rounded-3xl border border-white/80">
+                        Todavía no tienes ventas registradas para calcular estadísticas.
+                    </div>
+
+                    <div id="topsellers-winner" class="hidden glass-panel border border-white/80 rounded-3xl p-6 mb-6 flex items-center gap-5">
+                        <div class="w-16 h-16 rounded-2xl bg-amber-100 flex items-center justify-center text-4xl flex-shrink-0">🥇</div>
+                        <div>
+                            <p class="text-[10px] text-muted font-bold uppercase tracking-wider">Producto más vendido</p>
+                            <p id="topsellers-winner-name" class="font-display font-black text-2xl text-ink"></p>
+                            <p id="topsellers-winner-detail" class="text-sm text-ink/60 font-medium"></p>
+                        </div>
+                    </div>
+
+                    <div id="topsellers-list" class="glass-panel border border-white/80 rounded-3xl p-6 space-y-4"></div>
+                </section>
+
+                <!-- =====================================================
+                     PROVEEDORES: marca, días de visita, y lista de
+                     productos de preventa con su precio. Propio de cada
+                     cuenta (igual que inventario, ventas y préstamos). -->
+                <section id="view-suppliers" class="view-section flex-col p-8 lg:p-10">
+                    <header class="mb-6 flex items-center justify-between flex-wrap gap-3">
+                        <div>
+                            <h1 class="font-display text-4xl font-extrabold text-ink mb-1">🚚 Proveedores</h1>
+                            <p class="text-ink/60 font-medium">Marca, días que viene, y qué le vas a pedir en su próxima visita.</p>
+                        </div>
+                        <button id="btn-toggle-supplier-prices" type="button" class="text-xs font-bold text-ink/70 bg-white/70 hover:bg-white px-3.5 py-2 rounded-lg transition-colors border border-white/80 whitespace-nowrap">👁️ Mostrar Precios</button>
+                    </header>
+
+                    <div class="glass-panel border border-white/80 rounded-3xl p-6 mb-6">
+                        <h2 class="font-display font-bold text-ink mb-4">+ Nuevo Proveedor</h2>
+                        <form id="create-supplier-form" class="space-y-4">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <input type="text" id="new-supplier-brand" placeholder="Marca / Nombre del proveedor" required class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <input type="text" id="new-supplier-notes" placeholder="Notas (opcional, ej. teléfono, horario)" class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-ink/60 mb-2">Días que viene:</p>
+                                <div class="flex flex-wrap gap-2" id="new-supplier-days"></div>
+                            </div>
+                            <button type="submit" class="bg-ink hover:bg-ink/85 text-white px-6 py-3 rounded-xl font-display font-bold transition-all duration-200 shadow-md active:scale-95">Crear Proveedor</button>
+                        </form>
+                    </div>
+
+                    <div id="suppliers-empty" class="hidden text-center py-16 text-muted text-sm glass-panel rounded-3xl border border-white/80">
+                        Todavía no tienes proveedores registrados.
+                    </div>
+
+                    <div id="suppliers-list" class="space-y-5"></div>
+                </section>
+
+                <!-- =====================================================
+                     NOTAS: espacio libre para apuntar cualquier pendiente
+                     del negocio que no encaja en otro apartado -- cuánto
+                     se le pagó a un proveedor, qué producto hace falta
+                     pedir, o cuál ya se acabó. Propio de cada cuenta. -->
+                <section id="view-notes" class="view-section flex-col p-8 lg:p-10">
+                    <header class="mb-6">
+                        <h1 class="font-display text-4xl font-extrabold text-ink mb-1">📝 Notas</h1>
+                        <p class="text-ink/60 font-medium">Apunta pagos a proveedores, lo que hace falta y lo que ya se acabó, para no olvidarlo.</p>
+                    </header>
+
+                    <div class="glass-panel border border-white/80 rounded-3xl p-6 mb-6">
+                        <h2 class="font-display font-bold text-ink mb-4">+ Nueva Nota</h2>
+                        <form id="create-note-form" class="space-y-3">
+                            <div class="flex flex-wrap gap-2" id="new-note-category">
+                                <label class="cursor-pointer">
+                                    <input type="radio" name="note-category" value="pago" class="hidden peer" checked>
+                                    <span class="inline-block px-4 py-2 rounded-xl text-sm font-bold border border-white/80 bg-white/60 text-ink/70 peer-checked:bg-primary peer-checked:text-white peer-checked:border-primary transition-all">💰 Pago a Proveedor</span>
+                                </label>
+                                <label class="cursor-pointer">
+                                    <input type="radio" name="note-category" value="falta" class="hidden peer">
+                                    <span class="inline-block px-4 py-2 rounded-xl text-sm font-bold border border-white/80 bg-white/60 text-ink/70 peer-checked:bg-primary peer-checked:text-white peer-checked:border-primary transition-all">🧾 Falta Comprar</span>
+                                </label>
+                                <label class="cursor-pointer">
+                                    <input type="radio" name="note-category" value="agotado" class="hidden peer">
+                                    <span class="inline-block px-4 py-2 rounded-xl text-sm font-bold border border-white/80 bg-white/60 text-ink/70 peer-checked:bg-primary peer-checked:text-white peer-checked:border-primary transition-all">📦 Ya No Hay</span>
+                                </label>
+                                <label class="cursor-pointer">
+                                    <input type="radio" name="note-category" value="general" class="hidden peer">
+                                    <span class="inline-block px-4 py-2 rounded-xl text-sm font-bold border border-white/80 bg-white/60 text-ink/70 peer-checked:bg-primary peer-checked:text-white peer-checked:border-primary transition-all">📌 General</span>
+                                </label>
+                            </div>
+                            <div class="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3">
+                                <input type="text" id="new-note-content" placeholder="Ej. Pagué a Tortillería Lupita, o: hace falta pedir Coca de 600ml" required class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                                <input type="number" min="0" step="0.01" id="new-note-amount" placeholder="Monto (opcional)" class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink sm:w-40">
+                            </div>
+                            <button type="submit" class="bg-ink hover:bg-ink/85 text-white px-6 py-3 rounded-xl font-display font-bold transition-all duration-200 shadow-md active:scale-95">Guardar Nota</button>
+                        </form>
+                    </div>
+
+                    <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+                        <div class="flex flex-wrap gap-2" id="notes-filter">
+                            <button data-filter="pending" class="note-filter-btn text-xs font-bold px-3.5 py-2 rounded-lg transition-colors border border-white/80 bg-ink text-white">Pendientes</button>
+                            <button data-filter="all" class="note-filter-btn text-xs font-bold px-3.5 py-2 rounded-lg transition-colors border border-white/80 bg-white/70 text-ink/70 hover:bg-white">Todas</button>
+                            <button data-filter="done" class="note-filter-btn text-xs font-bold px-3.5 py-2 rounded-lg transition-colors border border-white/80 bg-white/70 text-ink/70 hover:bg-white">Resueltas</button>
+                        </div>
+                    </div>
+
+                    <div id="notes-empty" class="hidden text-center py-16 text-muted text-sm glass-panel rounded-3xl border border-white/80">
+                        No tienes notas todavía.
+                    </div>
+
+                    <div id="notes-list" class="space-y-3"></div>
+                </section>
+
+                <!-- =====================================================
+                     USUARIOS: exclusivo del Dueño. Aquí crea, desactiva o
+                     reactiva cuentas, y restablece contraseñas. El
+                     servidor protege esto por su cuenta (login_required
+                     ('owner') en /api/users), esta pantalla solo se
+                     muestra si el nav-button correspondiente está visible
+                     (ver enterApp en pos.js). -->
+                <section id="view-users" class="view-section flex-col p-8 lg:p-10">
+                    <header class="mb-6">
+                        <h1 class="font-display text-4xl font-extrabold text-ink mb-1">👥 Usuarios</h1>
+                        <p class="text-ink/60 font-medium">Solo tú (el Dueño) puedes crear cuentas nuevas y asignar contraseñas.</p>
+                    </header>
+
+                    <div class="glass-panel border border-white/80 rounded-3xl p-6 mb-6">
+                        <h2 class="font-display font-bold text-ink mb-4">+ Nuevo Usuario</h2>
+                        <form id="create-user-form" class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                            <input type="text" id="new-user-displayname" placeholder="Nombre (ej. Juan)" required class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                            <input type="text" id="new-user-username" placeholder="Usuario (para iniciar sesión)" required class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                            <input type="password" id="new-user-password" placeholder="Contraseña (mín. 8 caracteres)" required minlength="8" class="glass-input rounded-xl p-3 text-sm outline-none transition-all font-medium text-ink">
+                            <button type="submit" class="bg-ink hover:bg-ink/85 text-white px-6 py-3 rounded-xl font-display font-bold transition-all duration-200 shadow-md active:scale-95">Crear Usuario</button>
+                        </form>
+                        <p id="create-user-hint" class="hidden text-xs font-semibold mt-2.5"></p>
+                    </div>
+
+                    <div class="glass-panel border border-white/80 rounded-3xl p-6">
+                        <h2 class="font-display font-bold text-ink mb-4">Cuentas existentes</h2>
+                        <div class="overflow-x-auto rounded-xl border border-white/60">
+                            <table class="w-full text-sm bg-white/40">
+                                <thead class="text-muted uppercase text-[10px] font-bold bg-white/50">
+                                    <tr>
+                                        <th class="text-left py-3 px-4">Nombre</th>
+                                        <th class="text-left py-3 px-4">Usuario</th>
+                                        <th class="text-left py-3 px-4">Rol</th>
+                                        <th class="text-left py-3 px-4">Estado</th>
+                                        <th class="text-left py-3 px-4">Creado</th>
+                                        <th class="text-center py-3 px-4">Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="users-list-body" class="divide-y divide-white/60 text-ink font-medium"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+            </main>
+        </div>
+    </div><div id="ticket-modal" class="hidden fixed inset-0 bg-ink/40 backdrop-blur-sm flex justify-center items-center z-[60] p-4">
+        <div class="bg-white rounded-[1.75rem] shadow-2xl w-full max-w-sm flex flex-col max-h-[92vh] overflow-hidden">
+            <div class="p-5 border-b border-line flex items-center justify-between bg-paper/60 flex-shrink-0">
+                <h3 class="font-display font-bold text-ink flex items-center gap-2"><span class="text-xl">🧾</span> Venta completada</h3>
+                <button onclick="closeTicketModal()" class="text-muted hover:text-ink text-2xl leading-none transition-colors">✕</button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-6 bg-[#E9E3D8] flex justify-center">
+                <div id="ticket-print" class="ticket-paper rounded-sm"></div>
+            </div>
+            <div class="p-5 border-t border-line flex gap-3 flex-shrink-0 bg-white">
+                <button type="button" onclick="closeTicketModal()" class="flex-1 bg-white/80 hover:bg-white text-ink font-display font-bold py-3.5 rounded-xl border border-line transition-all duration-200 active:scale-95">Nueva venta</button>
+                <button type="button" onclick="printTicket()" class="flex-1 bg-ink hover:bg-ink/85 text-white font-display font-bold py-3.5 rounded-xl shadow-md transition-all duration-200 active:scale-95 flex items-center justify-center gap-2"><span>🖨️</span> Imprimir</button>
+            </div>
+        </div>
+    </div><div id="edit-modal" class="hidden fixed inset-0 bg-ink/30 backdrop-blur-sm flex justify-center items-center z-50 p-4">
+        <div class="glass-panel border border-white/80 p-8 rounded-[2rem] w-full max-w-md transform transition-all shadow-2xl">
+            <h2 class="font-display text-2xl font-bold text-ink mb-6 flex items-center gap-2"><span class="text-2xl">✏️</span> Modificar Ficha</h2>
+            <form id="edit-product-form" class="flex flex-col gap-5">
+                <input type="hidden" id="edit-id">
+                <div>
+                    <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Nombre Comercial</label>
+                    <input type="text" id="edit-name" required class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-medium text-ink">
+                </div>
+                <div>
+                    <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Código de Barras</label>
+                    <input type="text" id="edit-barcode" class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-mono font-medium text-ink">
+                </div>
+                <div>
+                    <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Marca</label>
+                    <input type="text" id="edit-brand" class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-medium text-ink">
+                </div>
+                <div>
+                    <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Sección</label>
+                    <select id="edit-category" required class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-medium text-ink appearance-none"></select>
+                </div>
+                <div class="flex gap-4">
+                    <div class="w-1/2">
+                        <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Costo $</label>
+                        <input type="number" step="0.01" id="edit-cost" class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-medium text-ink">
+                    </div>
+                    <div class="w-1/2">
+                        <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Precio $</label>
+                        <input type="number" step="0.01" id="edit-price" class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-medium text-ink">
+                    </div>
+                </div>
+                <div>
+                    <label class="text-xs text-ink/70 font-bold uppercase tracking-wider ml-1">Existencias</label>
+                    <input type="number" id="edit-stock" class="glass-input w-full rounded-xl p-3 mt-1.5 outline-none transition-all font-medium text-ink">
+                </div>
+                <div class="mt-4 flex gap-3">
+                    <button type="button" onclick="closeEditModal()" class="flex-1 py-3.5 bg-white/60 hover:bg-white text-ink font-bold rounded-xl border border-white/80 transition-all duration-200 active:scale-95 shadow-sm">Cancelar</button>
+                    <button type="submit" class="flex-1 py-3.5 bg-primary hover:bg-primary-dark text-white font-bold rounded-xl shadow-md transition-all duration-200 hover:-translate-y-0.5 active:scale-95">Guardar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/pos.js"></script>
+</body>
+</html>
