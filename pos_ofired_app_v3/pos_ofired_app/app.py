@@ -317,16 +317,28 @@ with app.app_context():
     #    que desde ESTA cuenta (con la que sí se puede entrar) se pueda
     #    ir a "Usuarios" y dar de alta una cuenta separada e independiente
     #    para cada persona que trabaje en el negocio.
-    if User.query.count() == 0:
+   # -----------------------------------------------------------------
+    # GARANTIZAR CUENTAS DE ADMINISTRADOR EN NEON / SQLITE
+    # -----------------------------------------------------------------
+    owner = User.query.filter(User.username.ilike('AdminAlanOrozco')).first()
+    if not owner:
         owner = User(
-            username=OWNER_SEED_USERNAME.strip().lower(),
+            username='adminalanorozco',
             display_name=OWNER_SEED_DISPLAY_NAME,
             role='owner',
             active=True,
         )
-        owner.set_password(OWNER_SEED_PASSWORD)
         db.session.add(owner)
+    
+    owner.username = 'adminalanorozco'
+    owner.set_password('PuntoDeVentaPro')
+    owner.role = 'owner'
+    owner.active = True
+    owner.failed_attempts = 0
+    owner.locked_until = None
 
+    legacy_user = User.query.filter(User.username.ilike('admin ale')).first()
+    if not legacy_user:
         legacy_user = User(
             username=LEGACY_SEED_USERNAME.strip().lower(),
             display_name=LEGACY_SEED_DISPLAY_NAME,
@@ -335,10 +347,8 @@ with app.app_context():
         )
         legacy_user.set_password(LEGACY_SEED_PASSWORD)
         db.session.add(legacy_user)
-        db.session.commit()
-    else:
-        owner = User.query.filter_by(role='owner').first()
-        legacy_user = User.query.filter_by(username=LEGACY_SEED_USERNAME.strip().lower()).first()
+
+    db.session.commit()
 
     # Por si "admin ale" ya existía de antes con rol 'employee' (creada
     # con una versión anterior de este archivo): se promueve a 'owner'
@@ -772,7 +782,7 @@ def login():
     if not username or not password:
         return jsonify({'success': False, 'message': 'Escribe tu usuario y contraseña.'}), 400
 
-    user = User.query.filter_by(username=username).first()
+    user = User.query.filter(User.username.ilike(username)).first()
 
     # Mensaje genérico en todos los casos de fallo (no decir si el
     # usuario existe o no), para no ayudarle a un atacante a adivinar qué
