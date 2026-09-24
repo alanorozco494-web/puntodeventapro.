@@ -2271,6 +2271,17 @@ def smart_inventory():
             '- "+10 Cheetos"'
         )
     })
+@app.route('/restablecer-admin')
+def restablecer_admin():
+    from werkzeug.security import generate_password_hash
+    # Busca al usuario AdminAlanOrozco
+    usuario = Usuario.query.filter_by(username='AdminAlanOrozco').first()
+    if usuario:
+        # Reemplaza 'TU_NUEVA_CONTRASEÑA' con la contraseña que quieras
+        usuario.password_hash = generate_password_hash('TU_NUEVA_CONTRASEÑA') 
+        db.session.commit()
+        return "✅ Contraseña de AdminAlanOrozco actualizada con éxito en PostgreSQL."
+    return "❌ No se encontró el usuario AdminAlanOrozco."
 
 if __name__ == '__main__':
     # RENDIMIENTO: "debug=True" deja prendido el vigilante de archivos y el
