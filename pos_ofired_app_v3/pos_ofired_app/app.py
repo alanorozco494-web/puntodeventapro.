@@ -2302,34 +2302,8 @@ def smart_inventory():
             '- "+10 Cheetos"'
         )
     })
-@app.route('/crear-admin-nuevo')
-def crear_admin_nuevo():
-    from models import User
-    from werkzeug.security import generate_password_hash
 
-    # Credenciales del nuevo perfil administrador
-    username_nuevo = "AlanProAdmin"
-    password_nueva = "Admin123456"
-
-    # Buscar si existe o crearlo
-    u = User.query.filter_by(username=username_nuevo).first()
-    if not u:
-        u = User(username=username_nuevo)
-        db.session.add(u)
-
-    # Asignar datos y permisos de Administrador
-    u.password_hash = generate_password_hash(password_nueva)
-    u.display_name = "Alan Orozco (Administrador)"
-    u.role = "admin"
-    u.active = True
-    if hasattr(u, 'failed_attempts'):
-        u.failed_attempts = 0
-    if hasattr(u, 'locked_until'):
-        u.locked_until = None
-
-    db.session.commit()
-    return f"✅ ¡Perfil '{username_nuevo}' listo! Ya puedes iniciar sesión con la contraseña '{password_nueva}'."
-
+    
 if __name__ == '__main__':
     # RENDIMIENTO: "debug=True" deja prendido el vigilante de archivos y el
     # depurador de Flask, que consumen memoria/CPU de fondo sin ningún
