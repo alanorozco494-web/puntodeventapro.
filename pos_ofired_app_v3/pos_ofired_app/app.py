@@ -125,6 +125,37 @@ def _clear_ip_attempts(ip):
 
 db.init_app(app)
 
+# === INICIALIZACIÓN AUTOMÁTICA DE BASE DE DATOS Y ADMINS ===
+with app.app_context():
+    try:
+        # 1. Crear todas las tablas en Neon si no existen
+        db.create_all()
+        
+        from models import User
+        from werkzeug.security import generate_password_hash
+
+        # 2. Crear o actualizar a AdminAlanOrozco
+        admin = User.query.filter_by(username='AdminAlanOrozco').first()
+        if not admin:
+            admin = User(username='AdminAlanOrozco')
+            db.session.add(admin)
+        
+        admin.password_hash = generate_password_hash('PuntoDeVentaPro')
+        admin.display_name = 'Admin Alan Orozco'
+        admin.role = 'admin'
+        admin.active = True
+
+        # 3. Asegurar que la cuenta 'ale' también sea Administrador
+        ale_user = User.query.filter_by(username='ale').first()
+        if ale_user:
+            ale_user.role = 'admin'
+            ale_user.active = True
+
+        db.session.commit()
+        print("✅ Base de datos y administradores creados con éxito en Neon.")
+    except Exception as e:
+        print(f"⚠️ Error al inicializar la base de datos: {e}")
+
 with app.app_context():
     # -----------------------------------------------------------------
     # ¡IMPORTANTE! Ya NO se borra la base de datos al iniciar el server.
